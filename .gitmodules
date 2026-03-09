@@ -1,0 +1,6 @@
+[submodule "gem5-tageassist"]
+	path = gem5-tageassist
+	url = https://github.com/e-turcotte/gem5-tageassist.git
+[submodule "llvm-tageassist"]
+	path = llvm-tageassist
+	url = https://github.com/e-turcotte/llvm-tageassist.git
