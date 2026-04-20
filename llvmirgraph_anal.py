@@ -96,20 +96,6 @@ TAGE_LOG_BIMODAL_SIZE = 13
 TAGE_ALL_LENGTHS = [0] + TAGE_HISTORY_LENGTHS
 
 
-def _gem5_compute_hist_lengths(n_tables: int, min_hist: int, max_hist: int) -> list:
-    """Reproduce gem5 TAGEBase::calculateParameters() geometric series."""
-    lengths = [0] * (n_tables + 1)  # index 0 unused
-    for i in range(1, n_tables + 1):
-        lengths[i] = int(min_hist * ((max_hist / min_hist) **
-                         ((i - 1) / (n_tables - 1))) + 0.5)
-    return lengths
-
-
-# Verify / override with exact computed values
-_computed = _gem5_compute_hist_lengths(TAGE_N_TABLES, TAGE_MIN_HIST, TAGE_MAX_HIST)
-TAGE_HISTORY_LENGTHS = _computed[1:]   # strip unused index-0
-
-
 # ---------------------------------------------------------------------------
 # gem5 TAGEBase hash functions  (tage_base.cc)
 # ---------------------------------------------------------------------------
