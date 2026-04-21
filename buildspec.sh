@@ -3,7 +3,7 @@
 HOMEDIR=/home/eddiet/interplay/
 mkdir -p $HOMEDIR/results
 
-arr=("500.perlbench_r" 
+arr=(#"500.perlbench_r" 
 	 "502.gcc_r"
 	 "505.mcf_r"
 	 #"520.omnetpp_r"
@@ -18,14 +18,16 @@ arr=("500.perlbench_r"
 
 for i in "${arr[@]}"
 do
-	echo "Building $i..." ; \
-	runcpu --config=spec-ir2 --action=setup $i > $HOMEDIR/results/$i_build.log ; \
+	echo "Building $i..."
+	runcpu --config=spec-ir2 --action=setup $i &> $HOMEDIR/results/$i_build.log &
 done
 
 wait
-echo "All spec bmks done now genertaing IR Graphs and Dwarf info..." ; \
 
 for i in "${arr[@]}"
 do
-	$HOMEDIR/generateIR.sh $i > $HOMEDIR/results/$i_data.log &
+	echo "Analyzing and Recompiling $i..."
+	$HOMEDIR/tageCS/generateIR.sh $i &> $HOMEDIR/results/$i_recomp.log &
 done
+
+wait
