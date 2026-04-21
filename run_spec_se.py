@@ -5,8 +5,8 @@ import re
 import sys
 
 # Paths based on your WSL environment
-spec_dir = "/home/eddiet/interplay/spec2017"
-gem5_dir = "/home/eddiet/interplay/tageCS/gem5-tageassist"
+spec_dir = os.path.expanduser("~/interplay/spec2017")
+gem5_dir = os.path.expanduser("~/interplay/tageCS/gem5-tageassist")
 gem5_opt = os.path.join(gem5_dir, "build/X86/gem5.fast")
 se_py = os.path.join(gem5_dir, "configs/deprecated/example/se.py")
 
@@ -19,6 +19,7 @@ parser.add_argument('--bp-type', help="e.g. TAGE, LTAGE")
 parser.add_argument('--warmup-insts', type=str, help="Number of warmup instructions")
 parser.add_argument('--maxinsts', type=str, help="Maximum instructions to execute")
 parser.add_argument('--fast-forward', type=str, help="Number of instructions to fast forward")
+parser.add_argument('--cmd-override', type=str, help="Use this binary instead of the SPEC exe (still uses SPEC inputs)")
 
 args, unknown_args = parser.parse_known_args()
 
@@ -77,8 +78,11 @@ if not exe_path:
     print("Could not parse the executable from speccmds.cmd.")
     sys.exit(1)
 
+if args.cmd_override:
+    exe_path = os.path.abspath(args.cmd_override)
+
 # Construct the gem5 launch command
-out_dir = os.path.join(os.getcwd(), f"m5out_{args.benchmark}")
+out_dir = os.path.join(os.getcwd(), f"m5out_{os.path.basename(exe_path)}")
 cmd = [gem5_opt, "-d", out_dir]
 
 if args.bp_type:
@@ -121,5 +125,4 @@ existing = env.get("PYTHONPATH", "")
 env["PYTHONPATH"] = configs_path + (":" + existing if existing else "")
 
 # Execute within the run directory so SPEC finds its input files
-with open(os.path.join(target_run_dir, "gem5_error.log"), 'w') as f:
-    subprocess.check_call(cmd, cwd=target_run_dir, env=env, stdout=f, stderr=subprocess.STDOUT)
+subprocess.check_call(cmd, cwd=target_run_dir, env=env)
