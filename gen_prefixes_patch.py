@@ -31,6 +31,7 @@ import sys
 import csv
 import argparse
 import subprocess
+import random
 from collections import defaultdict
 
 # ---------------------------------------------------------------------------
@@ -40,14 +41,14 @@ from collections import defaultdict
 # Edit these 8 bytes to whatever prefix values you want to emit.
 # ---------------------------------------------------------------------------
 BANK_TO_BYTE = [
-    0x00,   # bank 0 — bimodal
-    0x01,   # bank 1 — H=5
-    0x02,   # bank 2 — H=9
-    0x03,   # bank 3 — H=15
-    0x04,   # bank 4 — H=26
-    0x05,   # bank 5 — H=44
-    0x06,   # bank 6 — H=76
-    0x07,   # bank 7 — H=130
+    0x06,   # bank 0 — bimodal
+    0x07,   # bank 1 — H=5
+    0x0E,   # bank 2 — H=9
+    0x16,   # bank 3 — H=15
+    0x17,   # bank 4 — H=26
+    0x1E,   # bank 5 — H=44
+    0x1F,   # bank 6 — H=76
+    0x27,   # bank 7 — H=130
 ]
 
 # Maps H value string from llvm.anal to bank index
@@ -390,6 +391,8 @@ def build_patch_table(branch_pcs, pc_to_locs, loc_to_dbg_br, loc_to_dbg_all,
       6. Validate NOP exists in asm
     """
     rows = []
+    baseline_rows = []
+    rand_rows = []
     seen = set()
 
     stats = defaultdict(int)
@@ -448,14 +451,22 @@ def build_patch_table(branch_pcs, pc_to_locs, loc_to_dbg_br, loc_to_dbg_all,
         if valid_nop:
             rows.append({
                 'nop_pc':      f'0x{nop_pc}',
-                'prefix_byte': f'0x{prefix_byte:02x}' if prefix_byte is not None else '0x90'
+                'prefix_byte': f'0x{prefix_byte:02x}' if prefix_byte is not None else '0x{BANK_TO_BYTE[0]:02x}'
+            })
+            baseline_rows.append({
+                'nop_pc':      f'0x{nop_pc}',
+                'prefix_byte': f'0x{BANK_TO_BYTE[0]:02x}'
+            })
+            rand_rows.append({
+                'nop_pc':      f'0x{nop_pc}',
+                'prefix_byte': f'0x{BANK_TO_BYTE[random.randint(0,7)]:02x}'
             })
 
     print(f"\n[*] Patch table summary:", file=sys.stderr)
     for k, v in sorted(stats.items()):
         print(f"    {k:<35}: {v}", file=sys.stderr)
 
-    return rows
+    return rows, baseline_rows, rand_rows
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +528,7 @@ def main():
     pc_to_locs                           = symbolize_pcs(branch_pcs, args.binary,
                                                           args.llvm_bin)
 
-    rows = build_patch_table(
+    rows, baseline_rows, rand_rows = build_patch_table(
         branch_pcs, pc_to_locs,
         loc_to_dbg_br, loc_to_dbg_all,
         dbg_to_h, dbg_to_info,
@@ -525,6 +536,8 @@ def main():
     )
 
     write_csv(rows, args.output, clean_only=args.clean_only)
+    write_csv(baseline_rows, 'baseline_'+args.output, clean_only=args.clean_only)
+    write_csv(rand_rows, 'rand_'+args.output, clean_only=args.clean_only)
 
 
 if __name__ == '__main__':
