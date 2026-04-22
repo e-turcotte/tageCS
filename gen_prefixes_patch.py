@@ -32,6 +32,7 @@ import csv
 import argparse
 import subprocess
 import random
+import json
 from collections import defaultdict
 
 # ---------------------------------------------------------------------------
@@ -301,13 +302,18 @@ def parse_asm(asm_path):
 # Step 4: Symbolize branch PCs
 # ---------------------------------------------------------------------------
 
+import json
+import subprocess
+import sys
+from collections import defaultdict
+
 def symbolize_pcs(pcs, binary, llvm_bin):
     symbolizer = f"{llvm_bin}/llvm-symbolizer"
     pc_to_locs = defaultdict(list)
     addr_list  = sorted(pcs)
     input_str  = '\n'.join(f"0x{pc}" for pc in addr_list)
 
-    cmd = [symbolizer, f"--exe={binary}", "--output-style=GNU", "--inlines"]
+    cmd = [symbolizer, f"--exe={binary}", "--output-style=JSON", "--inlines"]
     print(f"[*] Running llvm-symbolizer on {len(addr_list)} branch PCs...",
           file=sys.stderr)
 
@@ -319,56 +325,35 @@ def symbolize_pcs(pcs, binary, llvm_bin):
         print(f"[!] llvm-symbolizer not found at {symbolizer}", file=sys.stderr)
         sys.exit(1)
 
-    out_lines = result.stdout.splitlines()
-    pc_idx = 0
-    i = 0
-    while i < len(out_lines) and pc_idx < len(addr_list):
-        line = out_lines[i].strip()
-        if not line:
-            pc_idx += 1
-            i += 1
-            continue
-        func = line
-        i += 1
-        if i < len(out_lines):
-            loc = out_lines[i].strip()
-            i += 1
-            parts = loc.rsplit(':', 2)
-            if len(parts) == 3:
-                try:
-                    pc = addr_list[pc_idx].lower()
-                    pc_to_locs[pc].append((
-                        parts[0], int(parts[1]), int(parts[2]), func
-                    ))
-                except ValueError:
-                    pass
-
-    # Fallback
-    if not pc_to_locs:
-        print("[*] Batch parse failed, falling back to one-at-a-time...", file=sys.stderr)
-        for pc in addr_list:
+    try:
+        # llvm-symbolizer JSON mode emits one JSON object per line
+        # not a single array, so parse line by line
+        pc_to_locs_parsed = defaultdict(list)
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
-                r = subprocess.run(
-                    [symbolizer, f"--exe={binary}", f"0x{pc}"],
-                    capture_output=True, text=True, timeout=10
-                )
-                lines2 = r.stdout.strip().splitlines()
-                for j in range(0, len(lines2) - 1, 2):
-                    parts2 = lines2[j+1].strip().rsplit(':', 2)
-                    if len(parts2) == 3:
-                        try:
-                            pc_to_locs[pc.lower()].append((
-                                parts2[0], int(parts2[1]), int(parts2[2]),
-                                lines2[j].strip()
-                            ))
-                        except ValueError:
-                            pass
-            except Exception:
-                pass
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            pc = entry.get('Address', '').replace('0x', '').lstrip('0').lower() or '0'
+            for sym in entry.get('Symbol', []):
+                filename = sym.get('FileName', '')
+                lineno   = sym.get('Line', 0)
+                col      = sym.get('Column', 0)
+                func     = sym.get('FunctionName', '?')
+                if filename and lineno:
+                    pc_to_locs_parsed[pc].append((filename, lineno, col, func))
+        if pc_to_locs_parsed:
+            return pc_to_locs_parsed
+        raise ValueError("no results parsed")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[!] JSON parse failed: {e}, falling back to one-at-a-time",
+              file=sys.stderr)
 
     print(f"[*] Symbolized {len(pc_to_locs)} branch PCs", file=sys.stderr)
     return pc_to_locs
-
 
 # ---------------------------------------------------------------------------
 # Step 5: Join everything and build patch table
@@ -451,7 +436,7 @@ def build_patch_table(branch_pcs, pc_to_locs, loc_to_dbg_br, loc_to_dbg_all,
         if valid_nop:
             rows.append({
                 'nop_pc':      f'0x{nop_pc}',
-                'prefix_byte': f'0x{prefix_byte:02x}' if prefix_byte is not None else '0x{BANK_TO_BYTE[0]:02x}'
+                'prefix_byte': f'0x{prefix_byte:02x}' if prefix_byte is not None else f'0x{BANK_TO_BYTE[0]:02x}'
             })
             baseline_rows.append({
                 'nop_pc':      f'0x{nop_pc}',
