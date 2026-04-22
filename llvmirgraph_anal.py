@@ -37,7 +37,7 @@ import json
 import glob
 import math
 import argparse
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -380,22 +380,33 @@ def _is_branch(node, graph: nx.DiGraph) -> bool:
 
 
 def _find_back_edges(graph: nx.DiGraph) -> set:
+    """Iterative DFS back-edge detection — avoids recursion limit issues."""
     back_edges = set()
-    visited, stack = set(), set()
-    sys.setrecursionlimit(max(sys.getrecursionlimit(), graph.number_of_nodes() * 4))
+    visited = set()
+    # Each stack frame: (node, iterator_over_successors, in_stack_set)
+    # We track the current DFS stack as a set for O(1) membership checks.
+    dfs_stack = set()
 
-    def dfs(u):
-        visited.add(u); stack.add(u)
-        for v in graph.successors(u):
-            if v not in visited:
-                dfs(v)
-            elif v in stack:
-                back_edges.add((u, v))
-        stack.discard(u)
-
-    for n in graph.nodes():
-        if n not in visited:
-            dfs(n)
+    for start in graph.nodes():
+        if start in visited:
+            continue
+        # Explicit stack: list of (node, successor_iterator)
+        call_stack = [(start, iter(graph.successors(start)))]
+        visited.add(start)
+        dfs_stack.add(start)
+        while call_stack:
+            node, succ_iter = call_stack[-1]
+            try:
+                v = next(succ_iter)
+                if v not in visited:
+                    visited.add(v)
+                    dfs_stack.add(v)
+                    call_stack.append((v, iter(graph.successors(v))))
+                elif v in dfs_stack:
+                    back_edges.add((node, v))
+            except StopIteration:
+                call_stack.pop()
+                dfs_stack.discard(node)
     return back_edges
 
 
@@ -435,36 +446,38 @@ def _extract_dbg_location(node, cfg: nx.DiGraph) -> str:
     return ""
 
 
+def _reachable_count(graph: nx.DiGraph, start) -> int:
+    """Count nodes reachable from start via BFS (faster than nx.descendants)."""
+    visited = {start}
+    queue = deque([start])
+    while queue:
+        n = queue.popleft()
+        for nb in graph.successors(n):
+            if nb not in visited:
+                visited.add(nb)
+                queue.append(nb)
+    return len(visited)
+
+
 def _static_bias(node, cfg: nx.DiGraph) -> float:
     """
     Estimate static branch bias from CFG structure.
-
-    A branch is considered biased if one successor dominates the reachable
-    subgraph much more than the other.  We approximate this by comparing
-    the number of nodes reachable from each successor — a taken edge leading
-    to a large subgraph vs a not-taken edge to a small one suggests bias.
-
-    Returns a value in [0.5, 1.0] where 1.0 = perfectly biased (one path
-    always taken), 0.5 = perfectly balanced.
-
-    This is a structural heuristic only.  Profile data would give exact bias.
+    Uses manual BFS instead of nx.descendants() to avoid NetworkX overhead.
     """
     succs = list(cfg.successors(node))
     if len(succs) != 2:
-        return 0.5   # not a simple conditional branch
+        return 0.5
 
-    # Count nodes reachable from each successor (proxy for path weight)
     try:
-        r0 = len(nx.descendants(cfg, succs[0])) + 1
-        r1 = len(nx.descendants(cfg, succs[1])) + 1
+        r0 = _reachable_count(cfg, succs[0])
+        r1 = _reachable_count(cfg, succs[1])
     except Exception:
         return 0.5
 
     total = r0 + r1
     if total == 0:
         return 0.5
-    dominant = max(r0, r1)
-    return dominant / total
+    return max(r0, r1) / total
 
 
 def analyze_cfg(cfg: nx.DiGraph) -> dict:
@@ -500,9 +513,9 @@ def analyze_cfg(cfg: nx.DiGraph) -> dict:
 
 def _bfs_depth(graph, start):
     visited = {start}
-    queue   = [(0, start)]
+    queue   = deque([(0, start)])
     while queue:
-        d, node = queue.pop(0)
+        d, node = queue.popleft()
         yield d, node
         for nb in graph.successors(node):
             if nb not in visited:
@@ -540,16 +553,19 @@ def analyze_ddg(ddg: nx.DiGraph) -> dict:
 # ---------------------------------------------------------------------------
 
 def analyze_dom(dom: nx.DiGraph) -> dict:
-    """Returns {node: depth} for all nodes in the dominator tree."""
+    """Returns {node: depth} for all nodes in the dominator tree.
+    Uses a single BFS pass rather than one shortest_path call per node."""
     roots = [n for n in dom.nodes() if dom.in_degree(n) == 0]
     if not roots:
         return {}
-    depths = {}
-    for node in nx.bfs_tree(dom, roots[0]).nodes():
-        try:
-            depths[node] = len(nx.shortest_path(dom, roots[0], node)) - 1
-        except nx.NetworkXNoPath:
-            depths[node] = 0
+    depths = {roots[0]: 0}
+    queue = deque([roots[0]])
+    while queue:
+        node = queue.popleft()
+        for child in dom.successors(node):
+            if child not in depths:
+                depths[child] = depths[node] + 1
+                queue.append(child)
     return depths
 
 
@@ -560,23 +576,19 @@ def analyze_dom(dom: nx.DiGraph) -> dict:
 def analyze_postdom(postdom: nx.DiGraph) -> dict:
     """
     Returns {node: post_dom_distance}.
-
-    In a post-dominator tree the root is the exit node.  The depth of a node
-    from the root is how many 'reconvergence steps' are between it and the
-    exit — i.e. the length of its forward shadow in the CFG.  A branch that
-    post-dominates nothing except itself (very short shadow) gets depth 0;
-    a branch deep in the post-dom tree has a long shadow and its outcome
-    influences many subsequent blocks.
+    Uses a single BFS pass rather than one shortest_path call per node.
     """
     roots = [n for n in postdom.nodes() if postdom.in_degree(n) == 0]
     if not roots:
         return {}
-    depths = {}
-    for node in nx.bfs_tree(postdom, roots[0]).nodes():
-        try:
-            depths[node] = len(nx.shortest_path(postdom, roots[0], node)) - 1
-        except nx.NetworkXNoPath:
-            depths[node] = 0
+    depths = {roots[0]: 0}
+    queue = deque([roots[0]])
+    while queue:
+        node = queue.popleft()
+        for child in postdom.successors(node):
+            if child not in depths:
+                depths[child] = depths[node] + 1
+                queue.append(child)
     return depths
 
 
@@ -769,26 +781,29 @@ def analyze_aliasing(branches: list, ablation: "AblationConfig") -> dict:
 
         destructive = 0
         constructive = 0
-        for peer in peers:
-            pc2  = _pc_for_branch(peer.branch_id)
-            prob = _estimate_alias_probability(pc1, pc2, tidx)
-            if ablation.destructive_alias and prob > ALIAS_DESTRUCTIVE_THRESHOLD:
-                destructive += 1
-            elif ablation.constructive_alias and prob > ALIAS_BENIGN_THRESHOLD:
-                constructive += 1
+        # Only compute alias probabilities if at least one flag needs them
+        if ablation.destructive_alias or ablation.constructive_alias:
+            for peer in peers:
+                pc2  = _pc_for_branch(peer.branch_id)
+                prob = _estimate_alias_probability(pc1, pc2, tidx)
+                if ablation.destructive_alias and prob > ALIAS_DESTRUCTIVE_THRESHOLD:
+                    destructive += 1
+                elif ablation.constructive_alias and prob > ALIAS_BENIGN_THRESHOLD:
+                    constructive += 1
 
-        # Find the lowest table where destructive aliases drop to zero
+        # Find the lowest alias-free table — only needed when bumping is active
         alias_free = tidx
-        for t in range(tidx, len(TAGE_ALL_LENGTHS)):
-            peers_at_t = [p for p in branches
-                          if table_index_for_length(p.signals.tage_length) == t
-                          and p.branch_id != b.branch_id]
-            d = sum(1 for p in peers_at_t
-                    if _estimate_alias_probability(pc1, _pc_for_branch(p.branch_id), t)
-                    > ALIAS_DESTRUCTIVE_THRESHOLD)
-            if d == 0:
-                alias_free = t
-                break
+        if ablation.destructive_alias:
+            for t in range(tidx, len(TAGE_ALL_LENGTHS)):
+                peers_at_t = [p for p in branches
+                              if table_index_for_length(p.signals.tage_length) == t
+                              and p.branch_id != b.branch_id]
+                d = sum(1 for p in peers_at_t
+                        if _estimate_alias_probability(pc1, _pc_for_branch(p.branch_id), t)
+                        > ALIAS_DESTRUCTIVE_THRESHOLD)
+                if d == 0:
+                    alias_free = t
+                    break
 
         def _len_for_table(t):
             return TAGE_ALL_LENGTHS[t] if t < len(TAGE_ALL_LENGTHS) else TAGE_ALL_LENGTHS[-1]
@@ -1049,9 +1064,17 @@ def run_analysis(
             ))
 
     # Phase 2+3: aliasing analysis and table bump
-    if branches:
+    # Skip entirely if both alias flags are off — the analysis is O(B^2)
+    # and produces no output when neither flag is active.
+    if branches and (ablation.destructive_alias or ablation.constructive_alias):
         alias_map = analyze_aliasing(branches, ablation)
         apply_alias_results(branches, alias_map)
+    elif branches:
+        # No aliasing requested — just set final_table/final_length from base score
+        for b in branches:
+            s = b.signals
+            s.final_table  = table_index_for_length(s.tage_length)
+            s.final_length = s.tage_length
 
     branches.sort(key=lambda b: (-b.signals.final_length, -b.signals.raw_score))
     return branches
